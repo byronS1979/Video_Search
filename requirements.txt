@@ -5,5 +5,5 @@ numpy==1.21.0
 matplotlib==3.6.0
 python-multipart==0.0.5
 gunicorn==20.1.0
-git+https://github.com/twelvelabs-io/twelvelabs-python.git@v0.4.6#egg=twelvelabs
+twelvelabs==0.4.6
 
