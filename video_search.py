@@ -1,12 +1,12 @@
 """
-main20.py
+video_search.py (renamed as main25.py)
 
 A FastAPI application that:
   - Performs 12Labs video search
   - Allows scene selection in a cart that persists across filtering/pagination
     (only flushes if the query changes)
   - Provides a floating video preview on the Select Timepoints page
-  - Generates aggregated line or box graphs with tab-delimited data, saved as .csv
+  - Generates aggregated line or box graphs with CSV data, saved as a downloadable file
   - Displays a Neuro-Insight logo (remote URL) on the home page
   - For the line aggregator CSV, time is in milliseconds in column A,
     and measures appear horizontally across row 1 to mimic the original CSV style.
@@ -26,8 +26,19 @@ import base64
 from fastapi import FastAPI, HTTPException, Query, Form
 from fastapi.responses import HTMLResponse
 from twelvelabs import TwelveLabs
+from html import escape  # Used for escaping HTML special characters
 
 app = FastAPI()
+
+# ------------------------------
+# Helper function for safe filenames
+# ------------------------------
+def safe_filename(query: str) -> str:
+    """
+    Returns a file-name–safe version of the query by keeping alphanumerics and _ or -
+    and replacing other characters with underscores.
+    """
+    return "".join(c if c.isalnum() or c in "_-" else "_" for c in query)
 
 # ------------------------------
 # 12Labs and CSV CONFIGURATION
@@ -52,7 +63,7 @@ ORDERED_MEASURES = [
     "Visual Attention - Composite"
 ]
 
-MEASURE_COLUMNS = ORDERED_MEASURES  # same set, just reusing the same list
+MEASURE_COLUMNS = ORDERED_MEASURES  # same set, reused
 
 # ------------------------------
 # Azure Blob Storage SAS SETTINGS
@@ -82,7 +93,7 @@ def flatten_clips(grouped):
 
 def gather_all_clips(query: str):
     try:
-        from twelvelabs import TwelveLabsError  # Just in case we need a specific error type
+        from twelvelabs import TwelveLabsError  # Just in case a specific error type is needed
     except ImportError:
         TwelveLabsError = Exception
 
@@ -269,7 +280,7 @@ def search_results(
 
     filter_form = (
         f'<form action="/search" method="get">'
-        f'<input type="hidden" name="query" value="{query}">'
+        f'<input type="hidden" name="query" value="{escape(query)}">'
         f'<label for="conf_filter">Filter by Confidence: </label>'
         f'<select name="conf_filter">'
         f'<option value="all" {"selected" if conf_filter.lower() == "all" else ""}>Show All ({all_count})</option>'
@@ -283,11 +294,11 @@ def search_results(
 
     nav_links = ""
     if page > 1:
-        nav_links += f'<a href="/search?query={query}&conf_filter={conf_filter}&page=1">Skip to Start</a> | '
-        nav_links += f'<a href="/search?query={query}&conf_filter={conf_filter}&page={page-1}">Previous</a> | '
+        nav_links += f'<a href="/search?query={escape(query)}&conf_filter={conf_filter}&page=1">Skip to Start</a> | '
+        nav_links += f'<a href="/search?query={escape(query)}&conf_filter={conf_filter}&page={page-1}">Previous</a> | '
     if page < total_pages:
-        nav_links += f'<a href="/search?query={query}&conf_filter={conf_filter}&page={page+1}">Next</a> | '
-        nav_links += f'<a href="/search?query={query}&conf_filter={conf_filter}&page={total_pages}">Skip to End</a>'
+        nav_links += f'<a href="/search?query={escape(query)}&conf_filter={conf_filter}&page={page+1}">Next</a> | '
+        nav_links += f'<a href="/search?query={escape(query)}&conf_filter={conf_filter}&page={total_pages}">Skip to End</a>'
 
     query_check_script = f"""
     <script>
@@ -309,7 +320,7 @@ def search_results(
         }});
     }}
     window.onload = function() {{
-        checkQueryChange("{query}");
+        checkQueryChange("{escape(query)}");
         updateCartDisplay();
         loadStoredSelections();
     }};
@@ -320,11 +331,14 @@ def search_results(
     html += """
     <style>
     li { transition: background-color 0.3s; }
+    /* Modified cart container: set a max-height and enable vertical scrolling */
     #cartContainer {
         position: fixed;
         top: 10px;
         right: 10px;
         width: 300px;
+        max-height: 300px;
+        overflow-y: auto;
         background-color: #f9f9f9;
         border: 1px solid #ccc;
         padding: 10px;
@@ -459,22 +473,22 @@ def search_results(
     }
     </script>
     """
-
     html += "</head><body>"
-    html += """
+    html += f"""
     <div id="cartContainer">
       <h2>Selected Scenes (<span id="cartCount">0</span>)</h2>
       <div id="cartItems"></div>
       <button onclick="emptyCart()">Empty Cart</button>
       <form method="post" action="/select_timepoints">
          <input type="hidden" name="cartSelections" id="cartInput" value="">
+         <!-- Pass the query to the next endpoint -->
+         <input type="hidden" name="query" value="{escape(query)}">
          <button type="button" onclick="document.getElementById('cartInput').value = JSON.stringify(getStoredSelection()); this.form.submit();">
              Select Timepoints for Averages
          </button>
       </form>
     </div>
     """
-
     html += f"<h1>Results for: {query}</h1>"
     html += filter_form
     html += f"<p><strong>Total Hits:</strong> {total_hits}</p>"
@@ -521,7 +535,7 @@ def update_metrics(video_id: str = Query(...), start_time: float = Query(...), e
         return HTMLResponse(content=f"Error computing metrics: {e}", status_code=500)
 
 @app.post("/select_timepoints", response_class=HTMLResponse)
-def select_timepoints(cartSelections: str = Form(...)):
+def select_timepoints(cartSelections: str = Form(...), query: str = Form(...)):
     flush_cart_script = "<script>sessionStorage.removeItem('selectedClips');</script>"
     try:
         selections = json.loads(cartSelections)
@@ -650,8 +664,10 @@ def select_timepoints(cartSelections: str = Form(...)):
     """ + flush_cart_script
     html += "</head><body>"
     html += "<h1>Select Timepoints for Each Moment</h1>"
+    html += f'<h2>Query: {escape(query)}</h2>'
     html += '<a href="javascript:history.back()">Back to Search Results</a><br><br>'
     html += "<form method='post' action='/compute_averages'>"
+    html += f"<input type='hidden' name='query' value='{escape(query)}'>"
     html += f"<input type='hidden' id='clip_count' value='{len(selections)}'>"
 
     for i, clip_str in enumerate(selections):
@@ -684,7 +700,8 @@ def compute_averages(
     video_id: list[str] = Form(...),
     start_time: list[float] = Form(...),
     end_time: list[float] = Form(...),
-    ad_name: list[str] = Form(...)
+    ad_name: list[str] = Form(...),
+    query: str = Form(...)
 ):
     combined_segments = []
     for i in range(len(video_id)):
@@ -720,6 +737,7 @@ def compute_averages(
 
     html = "<html><head><title>Computed Averages</title></head><body>"
     html += "<h1>Computed Average Metrics</h1>"
+    html += f"<h2>Query: {escape(query)}</h2>"
     html += "<ul>"
     for measure, avg_val in average_metrics.items():
         html += f"<li>{measure}: {avg_val:.2f}</li>"
@@ -745,12 +763,12 @@ def compute_averages(
         <input type="radio" id="line" name="graph_type" value="line">
         <label for="line">Line Graph (with Pre/Post Sliders)</label><br><br>
     """
+    html += f'<input type="hidden" name="query" value="{escape(query)}">'
     for i in range(len(video_id)):
         html += f'<input type="hidden" name="video_id" value="{video_id[i]}">'
         html += f'<input type="hidden" name="start_time" value="{start_time[i]}">'
         html += f'<input type="hidden" name="end_time" value="{end_time[i]}">'
         html += f'<input type="hidden" name="ad_name" value="{ad_name[i]}">'
-
     html += """
         <div id="line_options" style="display:none;">
             <label for="pre_duration">Pre-highlight Duration (seconds, 0-10):</label>
@@ -786,7 +804,8 @@ def aggregated_graphs(
     end_time: list[float] = Form(...),
     ad_name: list[str] = Form(...),
     pre_duration: float = Form(0),
-    post_extra: float = Form(0)
+    post_extra: float = Form(0),
+    query: str = Form(...)
 ):
     durations = []
     for i in range(len(video_id)):
@@ -798,16 +817,15 @@ def aggregated_graphs(
             pass
     pure_duration = min(durations) if durations else 0
     if graph_type == "line":
-        return aggregated_line(video_id, start_time, end_time, ad_name, pre_duration, post_extra, pure_duration)
+        return aggregated_line(video_id, start_time, end_time, ad_name, pre_duration, post_extra, pure_duration, query)
     else:
-        return aggregated_box(video_id, start_time, end_time, ad_name, pure_duration)
+        return aggregated_box(video_id, start_time, end_time, ad_name, pure_duration, query)
 
-def aggregated_line(video_id, start_time, end_time, ad_name, pre_duration, post_extra, pure_duration):
+def aggregated_line(video_id, start_time, end_time, ad_name, pre_duration, post_extra, pure_duration, query):
     """
-    Renders line graphs from -pre_duration..(pure_duration+post_extra) for each measure,
-    but saves a tab-delimited .csv that matches the original CSV style:
-    - Time in milliseconds in column A
-    - Each measure across the top (row 1, columns B..)
+    Renders line graphs from -pre_duration to (pure_duration+post_extra) for each measure,
+    and creates a CSV (comma-delimited) with separate cells for each column.
+    The CSV file name is based on the query.
     """
     effective_post = pure_duration + post_extra
     common_time = np.linspace(-pre_duration, effective_post, 100)
@@ -859,29 +877,20 @@ def aggregated_line(video_id, start_time, end_time, ad_name, pre_duration, post_
         for measure in ORDERED_MEASURES:
             if measure in seg.columns:
                 values = seg[measure].values
-                # Interpolate for this measure
                 interp_vals = np.interp(common_time, times, values)
                 interp_data[measure].append(interp_vals)
-            else:
-                # If measure doesn't exist in this segment, skip
-                pass
 
-    # Now compute the average across all segments
+    # Compute the average across segments for each measure
     averaged = {}
     for measure in ORDERED_MEASURES:
         if interp_data[measure]:
-            # average across all included segments for this measure
-            stacked = np.vstack(interp_data[measure])  # shape (#segments, 100)
-            mean_vals = np.mean(stacked, axis=0)       # shape (100,)
+            stacked = np.vstack(interp_data[measure])
+            mean_vals = np.mean(stacked, axis=0)
             averaged[measure] = mean_vals
         else:
             averaged[measure] = None
 
-    # Build the line graphs
-    # (Same plotting code as before, just referencing 'averaged' in ORDERED_MEASURES)
-    fig_list = []
-    # We'll break it into 6 sub-plots as before
-    # 1) Approach / Withdraw
+    # Build the line graphs with titles including the query
     fig1, ax1 = plt.subplots(figsize=(6,4))
     if averaged["Approach / Withdraw"] is not None:
         ax1.plot(common_time, averaged["Approach / Withdraw"], label="Approach / Withdraw", color="blue")
@@ -889,7 +898,7 @@ def aggregated_line(video_id, start_time, end_time, ad_name, pre_duration, post_
     ax1.set_ylim(-0.5, 0.5)
     ax1.set_xlabel("Time (s)")
     ax1.set_ylabel("Approach / Withdraw")
-    ax1.set_title("Approach / Withdraw")
+    ax1.set_title("Approach / Withdraw - Query: " + query)
     ax1.legend()
     buf1 = BytesIO()
     fig1.savefig(buf1, format="png")
@@ -897,7 +906,6 @@ def aggregated_line(video_id, start_time, end_time, ad_name, pre_duration, post_
     img1 = base64.b64encode(buf1.read()).decode("utf-8")
     plt.close(fig1)
 
-    # 2) Engagement
     fig2, ax2 = plt.subplots(figsize=(6,4))
     if averaged["Engagement"] is not None:
         ax2.plot(common_time, averaged["Engagement"], label="Engagement", color="green")
@@ -905,7 +913,7 @@ def aggregated_line(video_id, start_time, end_time, ad_name, pre_duration, post_
     ax2.set_ylim(0, 1.0)
     ax2.set_xlabel("Time (s)")
     ax2.set_ylabel("Engagement")
-    ax2.set_title("Engagement")
+    ax2.set_title("Engagement - Query: " + query)
     ax2.legend()
     buf2 = BytesIO()
     fig2.savefig(buf2, format="png")
@@ -913,7 +921,6 @@ def aggregated_line(video_id, start_time, end_time, ad_name, pre_duration, post_
     img2 = base64.b64encode(buf2.read()).decode("utf-8")
     plt.close(fig2)
 
-    # 3) Emotional Intensity
     fig3, ax3 = plt.subplots(figsize=(6,4))
     if averaged["Emotional Intensity"] is not None:
         ax3.plot(common_time, averaged["Emotional Intensity"], label="Emotional Intensity", color="red")
@@ -921,7 +928,7 @@ def aggregated_line(video_id, start_time, end_time, ad_name, pre_duration, post_
     ax3.set_ylim(0, 1.0)
     ax3.set_xlabel("Time (s)")
     ax3.set_ylabel("Emotional Intensity")
-    ax3.set_title("Emotional Intensity")
+    ax3.set_title("Emotional Intensity - Query: " + query)
     ax3.legend()
     buf3 = BytesIO()
     fig3.savefig(buf3, format="png")
@@ -929,7 +936,6 @@ def aggregated_line(video_id, start_time, end_time, ad_name, pre_duration, post_
     img3 = base64.b64encode(buf3.read()).decode("utf-8")
     plt.close(fig3)
 
-    # 4) Memory Encoding (Detail, Global, Composite)
     fig4, ax4 = plt.subplots(figsize=(6,4))
     for measure in ["Memory Encoding - Detail", "Memory Encoding - Global", "Memory Encoding - Composite"]:
         if averaged[measure] is not None:
@@ -938,7 +944,7 @@ def aggregated_line(video_id, start_time, end_time, ad_name, pre_duration, post_
     ax4.set_ylim(0, 1.0)
     ax4.set_xlabel("Time (s)")
     ax4.set_ylabel("Memory Encoding")
-    ax4.set_title("Memory Encoding")
+    ax4.set_title("Memory Encoding - Query: " + query)
     ax4.legend(fontsize="small")
     buf4 = BytesIO()
     fig4.savefig(buf4, format="png")
@@ -946,7 +952,6 @@ def aggregated_line(video_id, start_time, end_time, ad_name, pre_duration, post_
     img4 = base64.b64encode(buf4.read()).decode("utf-8")
     plt.close(fig4)
 
-    # 5) General Attention (Detail, Global, Composite)
     fig5, ax5 = plt.subplots(figsize=(6,4))
     for measure in ["General Attention - Detail", "General Attention - Global", "General Attention - Composite"]:
         if averaged[measure] is not None:
@@ -955,7 +960,7 @@ def aggregated_line(video_id, start_time, end_time, ad_name, pre_duration, post_
     ax5.set_ylim(0, 1.0)
     ax5.set_xlabel("Time (s)")
     ax5.set_ylabel("General Attention")
-    ax5.set_title("General Attention")
+    ax5.set_title("General Attention - Query: " + query)
     ax5.legend(fontsize="small")
     buf5 = BytesIO()
     fig5.savefig(buf5, format="png")
@@ -963,7 +968,6 @@ def aggregated_line(video_id, start_time, end_time, ad_name, pre_duration, post_
     img5 = base64.b64encode(buf5.read()).decode("utf-8")
     plt.close(fig5)
 
-    # 6) Visual Attention (Detail, Global, Composite)
     fig6, ax6 = plt.subplots(figsize=(6,4))
     for measure in ["Visual Attention - Detail", "Visual Attention - Global", "Visual Attention - Composite"]:
         if averaged[measure] is not None:
@@ -972,7 +976,7 @@ def aggregated_line(video_id, start_time, end_time, ad_name, pre_duration, post_
     ax6.set_ylim(0, 1.0)
     ax6.set_xlabel("Time (s)")
     ax6.set_ylabel("Visual Attention")
-    ax6.set_title("Visual Attention")
+    ax6.set_title("Visual Attention - Query: " + query)
     ax6.legend(fontsize="small")
     buf6 = BytesIO()
     fig6.savefig(buf6, format="png")
@@ -980,36 +984,30 @@ def aggregated_line(video_id, start_time, end_time, ad_name, pre_duration, post_
     img6 = base64.b64encode(buf6.read()).decode("utf-8")
     plt.close(fig6)
 
-    # Build tab-delimited .csv with "Time(ms)" in col A, measures across row 1
+    # Create a CSV file (comma-delimited) with separate cells for each column.
     csv_output = StringIO()
-    csv_writer = csv.writer(csv_output, delimiter='\t')
-
-    # Row 1: "Time(ms)", then each measure
-    header = ["Time(ms)"] + ORDERED_MEASURES
+    csv_writer = csv.writer(csv_output, delimiter=',')
+    header = ["Query", "Time(ms)"] + ORDERED_MEASURES
     csv_writer.writerow(header)
 
-    # For each sample index i
     for i in range(len(common_time)):
-        # Convert time to milliseconds
         t_ms = int(common_time[i] * 1000)
-        row = [t_ms]
+        row = [query, t_ms]
         for measure in ORDERED_MEASURES:
             if averaged[measure] is not None:
                 row.append(averaged[measure][i])
             else:
-                row.append("")  # or 0 if you prefer
+                row.append("")
         csv_writer.writerow(row)
 
     csv_data = csv_output.getvalue()
     csv_base64 = base64.b64encode(csv_data.encode("utf-8")).decode("utf-8")
-    # Save as .csv but tab-delimited
-    download_link = f'<a href="data:text/csv;base64,{csv_base64}" download="aggregated_line_results.csv">Download Results</a>'
+    filename = f"{safe_filename(query)}_results.csv"
+    download_link = f'<a href="data:text/csv;base64,{csv_base64}" download="{filename}">Download Results</a>'
 
     html = "<html><head><title>Line Graph Aggregated Results</title></head><body>"
-    html += "<h1>Aggregated Averaged Metrics (Line Graphs)</h1>"
+    html += "<h1>Aggregated Averaged Metrics (Line Graphs) - Query: " + query + "</h1>"
     html += f"<p>Graphing from -{pre_duration:.2f} to {effective_post:.2f} seconds relative to each event's start.</p>"
-
-    # Insert the 6 images
     html += "<h2>Approach / Withdraw</h2>"
     html += f'<img src="data:image/png;base64,{img1}" alt="Approach / Withdraw"><br>'
     html += "<h2>Engagement</h2>"
@@ -1043,6 +1041,7 @@ def aggregated_line(video_id, start_time, end_time, ad_name, pre_duration, post_
         html += f'<input type="hidden" name="start_time" value="{start_time[i]}">'
         html += f'<input type="hidden" name="end_time" value="{end_time[i]}">'
         html += f'<input type="hidden" name="ad_name" value="{ad_name[i]}">'
+    html += f'<input type="hidden" name="query" value="{escape(query)}">'
     html += '<br><input type="submit" value="Update Graphs">'
     html += "</form>"
     html += "<br>" + download_link
@@ -1051,10 +1050,10 @@ def aggregated_line(video_id, start_time, end_time, ad_name, pre_duration, post_
     html += "</body></html>"
     return HTMLResponse(content=html)
 
-def aggregated_box(video_id, start_time, end_time, ad_name, pure_duration):
+def aggregated_box(video_id, start_time, end_time, ad_name, pure_duration, query):
     """
-    Renders box plots with tab-delimited .csv but .csv extension.
-    (unchanged from the previous version)
+    Renders box plots and creates a CSV (comma-delimited) in which each measure's data is output in separate cells.
+    The CSV file name is based on the query.
     """
     box_data = {m: [] for m in ORDERED_MEASURES}
     for i in range(len(video_id)):
@@ -1082,25 +1081,21 @@ def aggregated_box(video_id, start_time, end_time, ad_name, pure_duration):
 
     fig, axes = plt.subplots(2, 3, figsize=(18, 10))
 
-    # Approach / Withdraw
     if box_data["Approach / Withdraw"]:
         axes[0,0].boxplot(box_data["Approach / Withdraw"])
         axes[0,0].set_title("Approach / Withdraw")
         axes[0,0].set_ylim(-0.5, 0.5)
 
-    # Engagement
     if box_data["Engagement"]:
         axes[0,1].boxplot(box_data["Engagement"])
         axes[0,1].set_title("Engagement")
         axes[0,1].set_ylim(0, 1.0)
 
-    # Emotional Intensity
     if box_data["Emotional Intensity"]:
         axes[0,2].boxplot(box_data["Emotional Intensity"])
         axes[0,2].set_title("Emotional Intensity")
         axes[0,2].set_ylim(0, 1.0)
 
-    # Memory Encoding
     mem_data = []
     labels_mem = []
     for m in ["Memory Encoding - Detail", "Memory Encoding - Global", "Memory Encoding - Composite"]:
@@ -1112,7 +1107,6 @@ def aggregated_box(video_id, start_time, end_time, ad_name, pure_duration):
         axes[1,0].set_title("Memory Encoding")
         axes[1,0].set_ylim(0, 1.0)
 
-    # General Attention
     gen_data = []
     labels_gen = []
     for m in ["General Attention - Detail", "General Attention - Global", "General Attention - Composite"]:
@@ -1124,7 +1118,6 @@ def aggregated_box(video_id, start_time, end_time, ad_name, pure_duration):
         axes[1,1].set_title("General Attention")
         axes[1,1].set_ylim(0, 1.0)
 
-    # Visual Attention
     vis_data = []
     labels_vis = []
     for m in ["Visual Attention - Detail", "Visual Attention - Global", "Visual Attention - Composite"]:
@@ -1143,20 +1136,26 @@ def aggregated_box(video_id, start_time, end_time, ad_name, pure_duration):
     img = base64.b64encode(buf.read()).decode("utf-8")
     plt.close(fig)
 
-    # Tab-delimited, .csv extension
+    # Prepare CSV output with comma delimiter and separate cells for each data value.
     csv_output = StringIO()
-    csv_writer = csv.writer(csv_output, delimiter='\t')
-    csv_writer.writerow(["Measure", "Values (semicolon-separated)"])
+    csv_writer = csv.writer(csv_output, delimiter=',')
+    # Determine maximum number of values in any measure:
+    max_len = max((len(v) for v in box_data.values() if v), default=0)
+    header = ["Query", "Measure"] + [f"Value_{i+1}" for i in range(max_len)]
+    csv_writer.writerow(header)
     for measure in ORDERED_MEASURES:
         if box_data[measure]:
-            values_str = ";".join(map(str, box_data[measure]))
-            csv_writer.writerow([measure, values_str])
+            row = [query, measure] + box_data[measure]
+            # Pad with empty strings if needed for uniform column count
+            row += [""] * (max_len - len(box_data[measure]))
+            csv_writer.writerow(row)
     csv_data = csv_output.getvalue()
     csv_base64 = base64.b64encode(csv_data.encode("utf-8")).decode("utf-8")
-    download_link = f'<a href="data:text/csv;base64,{csv_base64}" download="aggregated_box_results.csv">Download Results</a>'
+    filename = f"{safe_filename(query)}_results.csv"
+    download_link = f'<a href="data:text/csv;base64,{csv_base64}" download="{filename}">Download Results</a>'
 
     html = "<html><head><title>Box and Whisker Aggregated Results</title></head><body>"
-    html += "<h1>Aggregated Box and Whisker Graphs (Pure Data)</h1>"
+    html += "<h1>Aggregated Box and Whisker Graphs (Pure Data) - Query: " + query + "</h1>"
     html += f"<p>Pure Event Duration: {pure_duration:.2f} seconds</p>"
     html += f'<img src="data:image/png;base64,{img}" alt="Box and Whisker Graphs"><br>'
     html += '<br><button onclick="javascript:history.back()">Back to Compute Averages</button>'
@@ -1172,7 +1171,8 @@ def aggregated_results(
     video_id: list[str] = Form(...),
     start_time: list[float] = Form(...),
     end_time: list[float] = Form(...),
-    ad_name: list[str] = Form(...)
+    ad_name: list[str] = Form(...),
+    query: str = Form(...)
 ):
     graph_type = "line"
     durations = []
@@ -1186,9 +1186,9 @@ def aggregated_results(
     pure_duration = min(durations) if durations else 0
 
     if graph_type == "line":
-        return aggregated_line(video_id, start_time, end_time, ad_name, pre_duration, post_extra, pure_duration)
+        return aggregated_line(video_id, start_time, end_time, ad_name, pre_duration, post_extra, pure_duration, query)
     else:
-        return aggregated_box(video_id, start_time, end_time, ad_name, pure_duration)
+        return aggregated_box(video_id, start_time, end_time, ad_name, pure_duration, query)
 
 if __name__ == "__main__":
     import uvicorn
