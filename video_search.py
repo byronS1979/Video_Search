@@ -1,5 +1,5 @@
 """
-video_search.py (renamed as main25.py)
+main20.py (renamed as main25.py)
 
 A FastAPI application that:
   - Performs 12Labs video search
@@ -13,6 +13,7 @@ A FastAPI application that:
 """
 
 import os
+from typing import List
 import math
 import csv
 import json
@@ -218,11 +219,25 @@ def render_clip(clip) -> str:
     return html
 
 @app.get("/", response_class=HTMLResponse)
+# OLD home_page removed
+
+@app.get("/", response_class=HTMLResponse)
 def home_page():
+    """
+    Home page that lists available video indexes and provides search bar.
+    """
+    try:
+        indexes = client.index.list(page_limit=50)
+    except Exception as e:
+        indexes = []
+    index_links = ""
+    for idx in indexes:
+        name = getattr(idx, "name", "") or idx.id
+        index_links += f'<li><a href="/index/{idx.id}">{escape(name)} ({idx.id})</a></li>'
     return HTMLResponse(content=f"""
     <html>
       <head>
-        <title>12Labs Video Search</title>
+        <title>12Labs Video Admin</title>
         <style>
           body {{
             font-family: Arial, sans-serif;
@@ -239,18 +254,18 @@ def home_page():
           <img src="https://www.neuro-insight.com/wp-content/uploads/2023/01/footer-site-logo-300x214.png"
                alt="Neuro-Insight Logo" style="width:150px;">
         </div>
-        <h1 style="margin-bottom: 30px;">12Labs Video Search</h1>
+        <h1 style="margin-bottom: 30px;">12Labs Video Administration</h1>
         <form action="/search" method="get">
-          <label for="query">Enter your search query (e.g., "man"):</label><br>
+          <label for="query">Search across all indexes:</label><br>
           <input type="text" id="query" name="query" size="50" required><br><br>
           <input type="submit" value="Search">
         </form>
+        <hr>
+        <h2>Available Video Indexes</h2>
+        <ul style='list-style-type:none;'>{index_links}</ul>
       </body>
     </html>
     """)
-
-cache = {}
-
 @app.get("/search", response_class=HTMLResponse)
 def search_results(
     query: str = Query(...),
@@ -1190,6 +1205,71 @@ def aggregated_results(
     else:
         return aggregated_box(video_id, start_time, end_time, ad_name, pure_duration, query)
 
+
+@app.get("/index/{index_id}", response_class=HTMLResponse)
+def list_videos_in_index(index_id: str, q: str = Query("", alias="q"), page: int = Query(1, ge=1)):
+    """
+    Display videos within a given index with optional filename search and deletion checkboxes.
+    """
+    per_page = 50
+    try:
+        videos = client.index.video.list(index_id=index_id, page=page, page_limit=per_page,
+                                         filename=q if q else None)
+    except Exception as e:
+        return HTMLResponse(content=f"Error retrieving videos: {e}", status_code=500)
+
+    total = getattr(videos, "page_info", None)
+    total_count = total.total_results if total else len(videos)
+    total_pages = (total_count + per_page - 1) // per_page if total_count else 1
+
+    nav = ""
+    if page > 1:
+        nav += f'<a href="/index/{index_id}?q={escape(q)}&page=1">First</a> | '
+        nav += f'<a href="/index/{index_id}?q={escape(q)}&page={page-1}">Prev</a> | '
+    if page < total_pages:
+        nav += f'<a href="/index/{index_id}?q={escape(q)}&page={page+1}">Next</a> | '
+        nav += f'<a href="/index/{index_id}?q={escape(q)}&page={total_pages}">Last</a>'
+    video_items = ""
+    for vid in videos:
+        fname = (getattr(getattr(vid, 'system_metadata', None), 'filename', None)
+        or getattr(vid, 'filename', None)
+        or getattr(vid, 'original_filename', None)
+        or 'Unnamed')
+        video_items += f"<li><input type='checkbox' name='video_id' value='{vid.id}'> {escape(fname)} ({vid.id})</li>"
+        html = f"""
+    <html><head><title>Videos in {index_id}</title></head><body>
+    <h1>Videos in Index {index_id}</h1>
+    <form method="get" action="/index/{index_id}">
+        <input type="text" name="q" value="{escape(q)}" placeholder="Search filename">
+        <input type="submit" value="Search">
+    </form>
+    <form method="post" action="/delete_videos">
+        <input type="hidden" name="index_id" value="{index_id}">
+        <ul style='list-style-type:none;'>{video_items}</ul>
+        <input type="submit" value="Delete Selected" onclick="return confirm('Delete selected videos?');">
+    </form>
+    <p>{nav}</p>
+    <br><a href="/">Back to Home</a>
+    </body></html>
+    """
+    return HTMLResponse(content=html)
+
+@app.post("/delete_videos", response_class=HTMLResponse)
+def delete_videos(index_id: str = Form(...), video_id: List[str] = Form(...)):
+    """
+    Delete selected videos from the specified index.
+    """
+    errors = []
+    for vid in video_id:
+        try:
+            client.index.video.delete(index_id=index_id, id=vid)
+        except Exception as e:
+            errors.append(f"{vid}: {e}")
+    if errors:
+        msg = "Some deletions failed:<br>" + "<br>".join(errors)
+    else:
+        msg = "Selected videos deleted successfully."
+    return HTMLResponse(content=f"<html><body><h1>{msg}</h1><a href='/index/{index_id}'>Back to Index</a></body></html>")
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=8000, reload=True)
