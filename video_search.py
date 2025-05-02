@@ -1,3 +1,4 @@
+import html
 """
 main20.py (renamed as main25.py)
 
@@ -30,6 +31,7 @@ from twelvelabs import TwelveLabs
 from html import escape  # Used for escaping HTML special characters
 
 app = FastAPI()
+cache = {}
 
 # ------------------------------
 # Helper function for safe filenames
